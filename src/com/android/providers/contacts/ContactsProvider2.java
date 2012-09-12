@@ -618,6 +618,7 @@ public class ContactsProvider2 extends AbstractContactsProvider
 
     private static final ProjectionMap sContactsColumns = ProjectionMap.builder()
             .add(Contacts.CUSTOM_RINGTONE)
+            .add(Contacts.CUSTOM_VIBRATION)
             .add(Contacts.DISPLAY_NAME)
             .add(Contacts.DISPLAY_NAME_ALTERNATIVE)
             .add(Contacts.DISPLAY_NAME_SOURCE)
@@ -827,6 +828,7 @@ public class ContactsProvider2 extends AbstractContactsProvider
             .add(RawContacts.TIMES_CONTACTED)
             .add(RawContacts.LAST_TIME_CONTACTED)
             .add(RawContacts.CUSTOM_RINGTONE)
+            .add(RawContacts.CUSTOM_VIBRATION)
             .add(RawContacts.SEND_TO_VOICEMAIL)
             .add(RawContacts.STARRED)
             .add(RawContacts.PINNED)
@@ -930,6 +932,7 @@ public class ContactsProvider2 extends AbstractContactsProvider
             .add(PhoneLookup.PHOTO_URI, "contacts_view." + Contacts.PHOTO_URI)
             .add(PhoneLookup.PHOTO_THUMBNAIL_URI, "contacts_view." + Contacts.PHOTO_THUMBNAIL_URI)
             .add(PhoneLookup.CUSTOM_RINGTONE, "contacts_view." + Contacts.CUSTOM_RINGTONE)
+            .add(PhoneLookup.CUSTOM_VIBRATION, "contacts_view." + Contacts.CUSTOM_VIBRATION)
             .add(PhoneLookup.HAS_PHONE_NUMBER, "contacts_view." + Contacts.HAS_PHONE_NUMBER)
             .add(PhoneLookup.SEND_TO_VOICEMAIL, "contacts_view." + Contacts.SEND_TO_VOICEMAIL)
             .add(PhoneLookup.NUMBER, Phone.NUMBER)
@@ -4732,6 +4735,10 @@ public class ContactsProvider2 extends AbstractContactsProvider
         ContactsDatabaseHelper.copyLongValue(
                 values, RawContacts.PINNED,
                 inputValues, Contacts.PINNED);
+	ContactsDatabaseHelper.copyStringValue(
+		values, RawContacts.CUSTOM_VIBRATION,
+		inputValues, Contacts.CUSTOMVIBRATION);
+	
 
         if (values.size() == 0) {
             return 0;  // Nothing to update, bail out.
@@ -4783,6 +4790,10 @@ public class ContactsProvider2 extends AbstractContactsProvider
         ContactsDatabaseHelper.copyLongValue(
                 values, RawContacts.PINNED,
                 inputValues, Contacts.PINNED);
+        ContactsDatabaseHelper.copyStringValue(
+		values, RawContacts.CUSTOM_VIBRATION,
+                inputValues, Contacts.CUSTOM_VIBRATION);
+
 
         values.put(Contacts.CONTACT_LAST_UPDATED_TIMESTAMP,
                 Clock.getInstance().currentTimeMillis());
