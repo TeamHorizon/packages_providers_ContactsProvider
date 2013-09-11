@@ -15,13 +15,13 @@
  */
 package com.android.providers.contacts;
 
-import com.android.providers.contacts.util.NeededForTesting;
-
 import android.content.ContentValues;
+import android.provider.ContactsContract.CommonDataKinds.StructuredName;
 import android.provider.ContactsContract.FullNameStyle;
 import android.provider.ContactsContract.PhoneticNameStyle;
-import android.provider.ContactsContract.CommonDataKinds.StructuredName;
 import android.text.TextUtils;
+
+import com.android.providers.contacts.util.NeededForTesting;
 
 import java.lang.Character.UnicodeBlock;
 import java.util.HashSet;
@@ -330,9 +330,6 @@ public class NameSplitter {
         }
 
         String firstToken = tokenizer.mTokens[tokenizer.mStartPointer];
-        if (mPrefixesSet.contains(firstToken.toUpperCase())) {
-           tokenizer.mStartPointer++;
-        }
         int count = 0;
         for (int i = tokenizer.mStartPointer; i < tokenizer.mEndPointer; i++) {
             tokens[count++] = tokenizer.mTokens[i];

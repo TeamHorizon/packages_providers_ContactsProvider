@@ -16,10 +16,10 @@
 
 package com.android.providers.contacts;
 
-import com.android.internal.util.Objects;
-
 import android.accounts.Account;
 import android.text.TextUtils;
+
+import com.google.common.base.Objects;
 
 /**
  * Account information that includes the data set, if any.

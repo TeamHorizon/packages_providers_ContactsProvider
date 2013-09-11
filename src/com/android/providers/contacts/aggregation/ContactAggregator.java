@@ -16,6 +16,29 @@
 
 package com.android.providers.contacts.aggregation;
 
+import android.database.Cursor;
+import android.database.DatabaseUtils;
+import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteQueryBuilder;
+import android.database.sqlite.SQLiteStatement;
+import android.net.Uri;
+import android.provider.ContactsContract.AggregationExceptions;
+import android.provider.ContactsContract.CommonDataKinds.Email;
+import android.provider.ContactsContract.CommonDataKinds.Identity;
+import android.provider.ContactsContract.CommonDataKinds.Phone;
+import android.provider.ContactsContract.CommonDataKinds.Photo;
+import android.provider.ContactsContract.Contacts;
+import android.provider.ContactsContract.Contacts.AggregationSuggestions;
+import android.provider.ContactsContract.Data;
+import android.provider.ContactsContract.DisplayNameSources;
+import android.provider.ContactsContract.FullNameStyle;
+import android.provider.ContactsContract.PhotoFiles;
+import android.provider.ContactsContract.RawContacts;
+import android.provider.ContactsContract.StatusUpdates;
+import android.text.TextUtils;
+import android.util.EventLog;
+import android.util.Log;
+
 import com.android.providers.contacts.ContactLookupKey;
 import com.android.providers.contacts.ContactsDatabaseHelper;
 import com.android.providers.contacts.ContactsDatabaseHelper.AccountsColumns;
@@ -40,30 +63,10 @@ import com.android.providers.contacts.TransactionContext;
 import com.android.providers.contacts.aggregation.util.CommonNicknameCache;
 import com.android.providers.contacts.aggregation.util.ContactMatcher;
 import com.android.providers.contacts.aggregation.util.ContactMatcher.MatchScore;
-import com.google.android.collect.Maps;
+import com.android.providers.contacts.database.ContactsTableUtil;
+import com.android.providers.contacts.util.Clock;
 
-import android.database.Cursor;
-import android.database.DatabaseUtils;
-import android.database.sqlite.SQLiteDatabase;
-import android.database.sqlite.SQLiteQueryBuilder;
-import android.database.sqlite.SQLiteStatement;
-import android.net.Uri;
-import android.provider.ContactsContract.AggregationExceptions;
-import android.provider.ContactsContract.CommonDataKinds.Email;
-import android.provider.ContactsContract.CommonDataKinds.Identity;
-import android.provider.ContactsContract.CommonDataKinds.Phone;
-import android.provider.ContactsContract.CommonDataKinds.Photo;
-import android.provider.ContactsContract.Contacts;
-import android.provider.ContactsContract.Contacts.AggregationSuggestions;
-import android.provider.ContactsContract.Data;
-import android.provider.ContactsContract.DisplayNameSources;
-import android.provider.ContactsContract.FullNameStyle;
-import android.provider.ContactsContract.PhotoFiles;
-import android.provider.ContactsContract.RawContacts;
-import android.provider.ContactsContract.StatusUpdates;
-import android.text.TextUtils;
-import android.util.EventLog;
-import android.util.Log;
+import com.google.android.collect.Maps;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -143,7 +146,6 @@ public class ContactAggregator {
     private SQLiteStatement mAggregatedPresenceReplace;
     private SQLiteStatement mPresenceContactIdUpdate;
     private SQLiteStatement mRawContactCountQuery;
-    private SQLiteStatement mContactDelete;
     private SQLiteStatement mAggregatedPresenceDelete;
     private SQLiteStatement mMarkForAggregation;
     private SQLiteStatement mPhotoIdUpdate;
@@ -299,10 +301,6 @@ public class ContactAggregator {
                 " FROM " + Tables.RAW_CONTACTS +
                 " WHERE " + RawContacts.CONTACT_ID + "=?"
                         + " AND " + RawContacts._ID + "<>?");
-
-        mContactDelete = db.compileStatement(
-                "DELETE FROM " + Tables.CONTACTS +
-                " WHERE " + Contacts._ID + "=?");
 
         mAggregatedPresenceDelete = db.compileStatement(
                 "DELETE FROM " + Tables.AGGREGATED_PRESENCE +
@@ -778,8 +776,7 @@ public class ContactAggregator {
             // Joining with an existing aggregate
             if (currentContactContentsCount == 0) {
                 // Delete a previous aggregate if it only contained this raw contact
-                mContactDelete.bindLong(1, currentContactId);
-                mContactDelete.execute();
+                ContactsTableUtil.deleteContact(db, currentContactId);
 
                 mAggregatedPresenceDelete.bindLong(1, currentContactId);
                 mAggregatedPresenceDelete.execute();
@@ -791,6 +788,10 @@ public class ContactAggregator {
             mContactUpdate.execute();
             mDbHelper.updateContactVisible(txContext, contactId);
             updateAggregatedStatusUpdate(contactId);
+            // Make sure the raw contact does not contribute to the current contact
+            if (currentContactId != 0) {
+                updateAggregateData(txContext, currentContactId);
+            }
         }
 
         if (contactIdToSplit != -1) {
@@ -1762,7 +1763,8 @@ public class ContactAggregator {
                         + Contacts.STARRED + "=?, "
                         + Contacts.HAS_PHONE_NUMBER + "=?, "
                         + Contacts.LOOKUP_KEY + "=?, "
-                        + Contacts.CUSTOM_VIBRATION + "=? " +
+                        + Contacts.CUSTOM_VIBRATION + "=?, "
+                        + Contacts.CONTACT_LAST_UPDATED_TIMESTAMP + "=? " +
                 " WHERE " + Contacts._ID + "=?";
 
         String INSERT_SQL =
@@ -1777,8 +1779,10 @@ public class ContactAggregator {
                         + Contacts.STARRED + ", "
                         + Contacts.HAS_PHONE_NUMBER + ", "
                         + Contacts.LOOKUP_KEY + ", "
-                        + Contacts.CUSTOM_VIBRATION + ") " +
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)";
+                        + Contacts.CUSTOM_VIBRATION + ", "
+                        + Contacts.CONTACT_LAST_UPDATED_TIMESTAMP
+                        + ") " +
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)";
 
         int NAME_RAW_CONTACT_ID = 1;
         int PHOTO_ID = 2;
@@ -1791,7 +1795,8 @@ public class ContactAggregator {
         int HAS_PHONE_NUMBER = 9;
         int LOOKUP_KEY = 10;
         int CUSTOM_VIBRATION = 11;
-        int CONTACT_ID = 12;
+        int CONTACT_LAST_UPDATED_TIMESTAMP = 12;
+        int CONTACT_ID = 13;
     }
 
     /**
@@ -1963,6 +1968,8 @@ public class ContactAggregator {
                 hasPhoneNumber);
         statement.bindString(ContactReplaceSqlStatement.LOOKUP_KEY,
                 Uri.encode(lookupKey.toString()));
+        statement.bindLong(ContactReplaceSqlStatement.CONTACT_LAST_UPDATED_TIMESTAMP,
+                Clock.getInstance().currentTimeMillis());
     }
 
     /**

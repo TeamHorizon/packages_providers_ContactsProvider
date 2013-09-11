@@ -16,14 +16,11 @@
 
 package com.android.providers.contacts;
 
-import com.android.common.content.SyncStateContentProviderHelper;
-import com.android.providers.contacts.aggregation.util.CommonNicknameCache;
-import com.android.providers.contacts.util.NeededForTesting;
-import com.google.android.collect.Sets;
 
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManager.NameNotFoundException;
@@ -80,9 +77,19 @@ import android.text.util.Rfc822Token;
 import android.text.util.Rfc822Tokenizer;
 import android.util.Log;
 
+import com.android.common.content.SyncStateContentProviderHelper;
+import com.android.providers.contacts.aggregation.util.CommonNicknameCache;
+import com.android.providers.contacts.database.ContactsTableUtil;
+import com.android.providers.contacts.database.DeletedContactsTableUtil;
+import com.android.providers.contacts.database.MoreDatabaseUtils;
+import com.android.providers.contacts.util.NeededForTesting;
+import com.google.android.collect.Sets;
+
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Set;
+
+import libcore.icu.ICU;
 
 /**
  * Database helper for contacts. Designed as a singleton to make sure that all
@@ -107,13 +114,14 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
      *   700-799 Jelly Bean
      * </pre>
      */
-    static final int DATABASE_VERSION = 705;
+    static final int DATABASE_VERSION = 710;
 
     private static final String DATABASE_NAME = "contacts2.db";
     private static final String DATABASE_PRESENCE = "presence_db";
 
     public interface Tables {
         public static final String CONTACTS = "contacts";
+        public static final String DELETED_CONTACTS = "deleted_contacts";
         public static final String RAW_CONTACTS = "raw_contacts";
         public static final String STREAM_ITEMS = "stream_items";
         public static final String STREAM_ITEM_PHOTOS = "stream_item_photos";
@@ -361,6 +369,12 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 + Contacts.SEND_TO_VOICEMAIL;
         public static final String CONCRETE_LOOKUP_KEY = Tables.CONTACTS + "."
                 + Contacts.LOOKUP_KEY;
+        public static final String CONCRETE_CONTACT_LAST_UPDATED_TIMESTAMP = Tables.CONTACTS + "."
+                + Contacts.CONTACT_LAST_UPDATED_TIMESTAMP;
+        public static final String PHONEBOOK_LABEL_PRIMARY = "phonebook_label";
+        public static final String PHONEBOOK_BUCKET_PRIMARY = "phonebook_bucket";
+        public static final String PHONEBOOK_LABEL_ALTERNATIVE = "phonebook_label_alt";
+        public static final String PHONEBOOK_BUCKET_ALTERNATIVE = "phonebook_bucket_alt";
     }
 
     public interface RawContactsColumns {
@@ -407,7 +421,15 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         public static final String CONCRETE_CONTACT_ID =
                 Tables.RAW_CONTACTS + "." + RawContacts.CONTACT_ID;
         public static final String CONCRETE_NAME_VERIFIED =
-                Tables.RAW_CONTACTS + "." + RawContacts.NAME_VERIFIED;
+            Tables.RAW_CONTACTS + "." + RawContacts.NAME_VERIFIED;
+        public static final String PHONEBOOK_LABEL_PRIMARY =
+            ContactsColumns.PHONEBOOK_LABEL_PRIMARY;
+        public static final String PHONEBOOK_BUCKET_PRIMARY =
+            ContactsColumns.PHONEBOOK_BUCKET_PRIMARY;
+        public static final String PHONEBOOK_LABEL_ALTERNATIVE =
+            ContactsColumns.PHONEBOOK_LABEL_ALTERNATIVE;
+        public static final String PHONEBOOK_BUCKET_ALTERNATIVE =
+            ContactsColumns.PHONEBOOK_BUCKET_ALTERNATIVE;
     }
 
     public interface ViewRawContactsColumns {
@@ -698,6 +720,8 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         String DIRECTORY_SCAN_COMPLETE = "directoryScanComplete";
         String AGGREGATION_ALGORITHM = "aggregation_v2";
         String KNOWN_ACCOUNTS = "known_accounts";
+        String ICU_VERSION = "icu_version";
+        String LOCALE = "locale";
     }
 
     /** In-memory cache of previously found MIME-type mappings */
@@ -781,6 +805,10 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         mUseStrictPhoneNumberComparison =
                 resources.getBoolean(
                         com.android.internal.R.bool.config_use_strict_phone_number_comparation);
+    }
+
+    public SQLiteDatabase getDatabase(boolean writable) {
+        return writable ? getWritableDatabase() : getReadableDatabase();
     }
 
     /**
@@ -945,17 +973,15 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 Contacts.STARRED + " INTEGER NOT NULL DEFAULT 0," +
                 Contacts.HAS_PHONE_NUMBER + " INTEGER NOT NULL DEFAULT 0," +
                 Contacts.LOOKUP_KEY + " TEXT," +
-                ContactsColumns.LAST_STATUS_UPDATE_ID + " INTEGER REFERENCES data(_id), " +
-                Contacts.CUSTOM_VIBRATION + " TEXT" +
+                ContactsColumns.LAST_STATUS_UPDATE_ID + " INTEGER REFERENCES data(_id)," +
+                Contacts.CUSTOM_VIBRATION + " TEXT," +
+                Contacts.CONTACT_LAST_UPDATED_TIMESTAMP + " INTEGER" +
         ");");
 
-        db.execSQL("CREATE INDEX contacts_has_phone_index ON " + Tables.CONTACTS + " (" +
-                Contacts.HAS_PHONE_NUMBER +
-        ");");
+        ContactsTableUtil.createIndexes(db);
 
-        db.execSQL("CREATE INDEX contacts_name_raw_contact_id_index ON " + Tables.CONTACTS + " (" +
-                Contacts.NAME_RAW_CONTACT_ID +
-        ");");
+        // deleted_contacts table
+        DeletedContactsTableUtil.create(db);
 
         // Raw_contacts table
         db.execSQL("CREATE TABLE " + Tables.RAW_CONTACTS + " (" +
@@ -981,11 +1007,18 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 RawContacts.DISPLAY_NAME_SOURCE + " INTEGER NOT NULL DEFAULT " +
                         DisplayNameSources.UNDEFINED + "," +
                 RawContacts.PHONETIC_NAME + " TEXT," +
+                // TODO: PHONETIC_NAME_STYLE should be INTEGER. There is a
+                // mismatch between how the column is created here (TEXT) and
+                // how it is created in upgradeToVersion205 (INTEGER).
                 RawContacts.PHONETIC_NAME_STYLE + " TEXT," +
                 RawContacts.SORT_KEY_PRIMARY + " TEXT COLLATE " +
                         ContactsProvider2.PHONEBOOK_COLLATOR_NAME + "," +
+                RawContactsColumns.PHONEBOOK_LABEL_PRIMARY + " TEXT," +
+                RawContactsColumns.PHONEBOOK_BUCKET_PRIMARY + " INTEGER," +
                 RawContacts.SORT_KEY_ALTERNATIVE + " TEXT COLLATE " +
                         ContactsProvider2.PHONEBOOK_COLLATOR_NAME + "," +
+                RawContactsColumns.PHONEBOOK_LABEL_ALTERNATIVE + " TEXT," +
+                RawContactsColumns.PHONEBOOK_BUCKET_ALTERNATIVE + " INTEGER," +
                 RawContacts.NAME_VERIFIED + " INTEGER NOT NULL DEFAULT 0," +
                 RawContacts.SYNC1 + " TEXT, " +
                 RawContacts.SYNC2 + " TEXT, " +
@@ -1278,7 +1311,7 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         ");");
 
         createDirectoriesTable(db);
-        createSearchIndexTable(db);
+        createSearchIndexTable(db, false /* we build stats table later */);
 
         db.execSQL("CREATE TABLE " + Tables.DATA_USAGE_STAT + "(" +
                 DataUsageStatColumns._ID + " INTEGER PRIMARY KEY AUTOINCREMENT, " +
@@ -1299,7 +1332,7 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         createContactsViews(db);
         createGroupsView(db);
         createContactsTriggers(db);
-        createContactsIndexes(db);
+        createContactsIndexes(db, false /* we build stats table later */);
 
         loadNicknameLookupTable(db);
 
@@ -1318,6 +1351,12 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
 
         ContentResolver.requestSync(null /* all accounts */,
                 ContactsContract.AUTHORITY, new Bundle());
+
+        // Only send broadcasts for regular contacts db.
+        if (dbForProfile() == 0) {
+            mContext.sendBroadcast(new Intent(ContactsContract.Intents.CONTACTS_DATABASE_CREATED),
+                    android.Manifest.permission.READ_CONTACTS);
+        }
     }
 
     protected void initializeAutoIncrementSequences(SQLiteDatabase db) {
@@ -1346,7 +1385,7 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         setProperty(db, DbProperties.DIRECTORY_SCAN_COMPLETE, "0");
     }
 
-    public void createSearchIndexTable(SQLiteDatabase db) {
+    public void createSearchIndexTable(SQLiteDatabase db, boolean rebuildSqliteStats) {
         db.execSQL("DROP TABLE IF EXISTS " + Tables.SEARCH_INDEX);
         db.execSQL("CREATE VIRTUAL TABLE " + Tables.SEARCH_INDEX
                 + " USING FTS4 ("
@@ -1355,6 +1394,9 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                     + SearchIndexColumns.NAME + " TEXT, "
                     + SearchIndexColumns.TOKENS + " TEXT"
                 + ")");
+        if (rebuildSqliteStats) {
+            updateSqliteStats(db);
+        }
     }
 
     private void createContactsTriggers(SQLiteDatabase db) {
@@ -1494,7 +1536,7 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 + " END");
     }
 
-    private void createContactsIndexes(SQLiteDatabase db) {
+    private void createContactsIndexes(SQLiteDatabase db, boolean rebuildSqliteStats) {
         db.execSQL("DROP INDEX IF EXISTS name_lookup_index");
         db.execSQL("CREATE INDEX name_lookup_index ON " + Tables.NAME_LOOKUP + " (" +
                 NameLookupColumns.NORMALIZED_NAME + "," +
@@ -1512,6 +1554,10 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         db.execSQL("CREATE INDEX raw_contact_sort_key2_index ON " + Tables.RAW_CONTACTS + " (" +
                 RawContacts.SORT_KEY_ALTERNATIVE +
         ");");
+
+        if (rebuildSqliteStats) {
+            updateSqliteStats(db);
+        }
     }
 
     private void createContactsViews(SQLiteDatabase db) {
@@ -1580,7 +1626,8 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 + Contacts.PHOTO_FILE_ID + ", "
                 + "CAST(" + Clauses.CONTACT_VISIBLE + " AS INTEGER) AS "
                         + Contacts.IN_VISIBLE_GROUP + ", "
-                + ContactsColumns.LAST_STATUS_UPDATE_ID;
+                + ContactsColumns.LAST_STATUS_UPDATE_ID + ", "
+                + ContactsColumns.CONCRETE_CONTACT_LAST_UPDATED_TIMESTAMP;
 
         String contactOptionColumns =
                 ContactsColumns.CONCRETE_CUSTOM_RINGTONE
@@ -1609,8 +1656,16 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                         + " AS " + Contacts.PHONETIC_NAME_STYLE + ", "
                 + "name_raw_contact." + RawContacts.SORT_KEY_PRIMARY
                         + " AS " + Contacts.SORT_KEY_PRIMARY + ", "
+                + "name_raw_contact." + RawContactsColumns.PHONEBOOK_LABEL_PRIMARY
+                        + " AS " + ContactsColumns.PHONEBOOK_LABEL_PRIMARY + ", "
+                + "name_raw_contact." + RawContactsColumns.PHONEBOOK_BUCKET_PRIMARY
+                        + " AS " + ContactsColumns.PHONEBOOK_BUCKET_PRIMARY + ", "
                 + "name_raw_contact." + RawContacts.SORT_KEY_ALTERNATIVE
-                        + " AS " + Contacts.SORT_KEY_ALTERNATIVE;
+                        + " AS " + Contacts.SORT_KEY_ALTERNATIVE + ", "
+                + "name_raw_contact." + RawContactsColumns.PHONEBOOK_LABEL_ALTERNATIVE
+                        + " AS " + ContactsColumns.PHONEBOOK_LABEL_ALTERNATIVE + ", "
+                + "name_raw_contact." + RawContactsColumns.PHONEBOOK_BUCKET_ALTERNATIVE
+                        + " AS " + ContactsColumns.PHONEBOOK_BUCKET_ALTERNATIVE;
 
         String dataSelect = "SELECT "
                 + DataColumns.CONCRETE_ID + " AS " + Data._ID + ","
@@ -1668,7 +1723,11 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 + RawContacts.PHONETIC_NAME  + ", "
                 + RawContacts.PHONETIC_NAME_STYLE  + ", "
                 + RawContacts.SORT_KEY_PRIMARY  + ", "
+                + RawContactsColumns.PHONEBOOK_LABEL_PRIMARY  + ", "
+                + RawContactsColumns.PHONEBOOK_BUCKET_PRIMARY  + ", "
                 + RawContacts.SORT_KEY_ALTERNATIVE + ", "
+                + RawContactsColumns.PHONEBOOK_LABEL_ALTERNATIVE  + ", "
+                + RawContactsColumns.PHONEBOOK_BUCKET_ALTERNATIVE  + ", "
                 + dbForProfile() + " AS " + RawContacts.RAW_CONTACT_IS_USER_PROFILE + ", "
                 + rawContactOptionColumns + ", "
                 + syncColumns
@@ -1912,6 +1971,16 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
     }
 
     @Override
+    public void onDowngrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        Log.i(TAG, "ContactsProvider cannot proceed because downgrading your database is not " +
+                "supported. To continue, please either re-upgrade to your previous Android " +
+                "version, or clear all application data in Contacts Storage (this will result " +
+                "in the loss of all local contacts that are not synced). To avoid data loss, " +
+                "your contacts database will not be wiped automatically.");
+        super.onDowngrade(db, oldVersion, newVersion);
+    }
+
+    @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
         if (oldVersion < 99) {
             Log.i(TAG, "Upgrading from version " + oldVersion + " to " + newVersion
@@ -1947,6 +2016,8 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         boolean upgradeLegacyApiSupport = false;
         boolean upgradeSearchIndex = false;
         boolean rescanDirectories = false;
+        boolean rebuildSqliteStats = false;
+        boolean upgradeLocaleSpecificData = false;
 
         if (oldVersion == 99) {
             upgradeViewsAndTriggers = true;
@@ -2383,37 +2454,90 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         }
 
         if (oldVersion < 705) {
-            upgradeToVersion705(db);
-            upgradeViewsAndTriggers = true;
+            // Before this version, we didn't rebuild the search index on locale changes, so
+            // if the locale has changed after sync, the index contains gets stale.
+            // To correct the issue we have to rebuild the index here.
+            upgradeSearchIndex = true;
             oldVersion = 705;
+        }
+
+        if (oldVersion < 706) {
+            upgradeToVersion706(db);
+            upgradeViewsAndTriggers = true; 
+            oldVersion = 706;
+        }
+
+        if (oldVersion < 707) {
+            // Prior to this version, we didn't rebuild the stats table after drop operations,
+            // which resulted in losing some of the rows from the stats table.
+            rebuildSqliteStats = true;
+            oldVersion = 707;
+        }
+
+        if (oldVersion < 707) {
+            upgradeToVersion707(db);
+            upgradeViewsAndTriggers = true;
+            oldVersion = 707;
+        }
+
+        if (oldVersion < 708) {
+            // Sort keys, phonebook labels and buckets, and search keys have
+            // changed so force a rebuild.
+            upgradeLocaleSpecificData = true;
+            oldVersion = 708;
+        }
+        if (oldVersion < 709) {
+            // Added secondary locale phonebook labels; changed Japanese
+            // and Chinese sort keys.
+            upgradeLocaleSpecificData = true;
+            oldVersion = 709;
+        }
+
+        if (oldVersion < 710) {
+            upgradeToVersion710(db);
+            upgradeViewsAndTriggers = true;
+            oldVersion = 710;
         }
 
         if (upgradeViewsAndTriggers) {
             createContactsViews(db);
             createGroupsView(db);
             createContactsTriggers(db);
-            createContactsIndexes(db);
-            updateSqliteStats(db);
+            createContactsIndexes(db, false /* we build stats table later */);
             upgradeLegacyApiSupport = true;
+            rebuildSqliteStats = true;
         }
 
         if (upgradeLegacyApiSupport) {
             LegacyApiSupport.createViews(db);
         }
 
+        if (upgradeLocaleSpecificData) {
+            upgradeLocaleData(db, false /* we build stats table later */);
+            // Name lookups are rebuilt as part of the full locale rebuild
+            upgradeNameLookup = false;
+            upgradeSearchIndex = true;
+            rebuildSqliteStats = true;
+        }
+
         if (upgradeNameLookup) {
-            rebuildNameLookup(db);
+            rebuildNameLookup(db, false /* we build stats table later */);
+            rebuildSqliteStats = true;
         }
 
         if (upgradeSearchIndex) {
-            createSearchIndexTable(db);
-            setProperty(db, SearchIndexManager.PROPERTY_SEARCH_INDEX_VERSION, "0");
+            rebuildSearchIndex(db, false /* we build stats table later */);
+            rebuildSqliteStats = true;
         }
 
         if (rescanDirectories) {
             // Force the next ContactDirectoryManager.scanAllPackages() to rescan all packages.
             // (It's called from the BACKGROUND_TASK_UPDATE_ACCOUNTS background task.)
             setProperty(db, DbProperties.DIRECTORY_SCAN_COMPLETE, "0");
+        }
+
+        if (rebuildSqliteStats) {
+            updateSqliteStats(db);
         }
 
         if (oldVersion != newVersion) {
@@ -2548,8 +2672,6 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         db.execSQL("ALTER TABLE " + Tables.RAW_CONTACTS
                 + " ADD " + RawContacts.SORT_KEY_ALTERNATIVE
                 + " TEXT COLLATE " + ContactsProvider2.PHONEBOOK_COLLATOR_NAME + ";");
-
-        final Locale locale = Locale.getDefault();
 
         NameSplitter splitter = createNameSplitter();
 
@@ -2694,8 +2816,7 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 sortKey = sortKeyAlternative = phoneticName;
             } else if (name.fullNameStyle == FullNameStyle.CHINESE ||
                     name.fullNameStyle == FullNameStyle.CJK) {
-                sortKey = sortKeyAlternative = ContactLocaleUtils.getIntance()
-                        .getSortKey(displayName, name.fullNameStyle);
+                sortKey = sortKeyAlternative = displayName;
             }
 
             if (sortKey == null) {
@@ -2752,20 +2873,7 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 organizationUpdate.bindLong(2, dataId);
                 organizationUpdate.execute();
 
-                String sortKey = null;
-                if (phoneticName == null && company != null) {
-                    int nameStyle = splitter.guessFullNameStyle(company);
-                    nameStyle = splitter.getAdjustedFullNameStyle(nameStyle);
-                    if (nameStyle == FullNameStyle.CHINESE ||
-                            nameStyle == FullNameStyle.CJK ) {
-                        sortKey = ContactLocaleUtils.getIntance()
-                                .getSortKey(company, nameStyle);
-                    }
-                }
-
-                if (sortKey == null) {
-                    sortKey = company;
-                }
+                String sortKey = company;
 
                 updateRawContact205(rawContactUpdate, rawContactId, company,
                         company, phoneticNameStyle, phoneticName, sortKey, sortKey);
@@ -2977,31 +3085,87 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 "WHERE NOT EXISTS (SELECT 1 FROM raw_contacts WHERE contact_id=contacts._id)");
     }
 
-    private void rebuildNameLookup(SQLiteDatabase db) {
+    private void rebuildNameLookup(SQLiteDatabase db, boolean rebuildSqliteStats) {
         db.execSQL("DROP INDEX IF EXISTS name_lookup_index");
         insertNameLookup(db);
-        createContactsIndexes(db);
+        createContactsIndexes(db, rebuildSqliteStats);
+    }
+
+    protected void rebuildSearchIndex() {
+        rebuildSearchIndex(getWritableDatabase(), true);
+    }
+
+    private void rebuildSearchIndex(SQLiteDatabase db, boolean rebuildSqliteStats) {
+        createSearchIndexTable(db, rebuildSqliteStats);
+        setProperty(db, SearchIndexManager.PROPERTY_SEARCH_INDEX_VERSION, "0");
     }
 
     /**
-     * Regenerates all locale-sensitive data: nickname_lookup, name_lookup and sort keys.
+     * Checks whether the current ICU code version matches that used to build
+     * the locale specific data in the ContactsDB.
      */
-    public void setLocale(ContactsProvider2 provider, Locale locale) {
-        Log.i(TAG, "Switching to locale " + locale);
+    public boolean needsToUpdateLocaleData(Locale locale) {
+        final String dbLocale = getProperty(DbProperties.LOCALE, "");
+        if (!dbLocale.equals(locale.toString())) {
+            return true;
+        }
+        final String curICUVersion = ICU.getIcuVersion();
+        final String dbICUVersion = getProperty(DbProperties.ICU_VERSION,
+                "(unknown)");
+        if (!curICUVersion.equals(dbICUVersion)) {
+            Log.i(TAG, "ICU version has changed. Current version is "
+                    + curICUVersion + "; DB was built with " + dbICUVersion);
+            return true;
+        }
+        return false;
+    }
+
+    private void upgradeLocaleData(SQLiteDatabase db, boolean rebuildSqliteStats) {
+        final Locale locale = Locale.getDefault();
+        Log.i(TAG, "Upgrading locale data for " + locale
+                + " (ICU v" + ICU.getIcuVersion() + ")");
+        final long start = SystemClock.elapsedRealtime();
+        initializeCache(db);
+        rebuildLocaleData(db, locale, rebuildSqliteStats);
+        Log.i(TAG, "Locale update completed in " + (SystemClock.elapsedRealtime() - start) + "ms");
+    }
+
+    private void rebuildLocaleData(SQLiteDatabase db, Locale locale,
+            boolean rebuildSqliteStats) {
+        db.execSQL("DROP INDEX raw_contact_sort_key1_index");
+        db.execSQL("DROP INDEX raw_contact_sort_key2_index");
+        db.execSQL("DROP INDEX IF EXISTS name_lookup_index");
+
+        loadNicknameLookupTable(db);
+        insertNameLookup(db);
+        rebuildSortKeys(db);
+        createContactsIndexes(db, rebuildSqliteStats);
+
+        FastScrollingIndexCache.getInstance(mContext).invalidate();
+        // Update the ICU version used to generate the locale derived data
+        // so we can tell when we need to rebuild with new ICU versions.
+        setProperty(db, DbProperties.ICU_VERSION, ICU.getIcuVersion());
+        setProperty(db, DbProperties.LOCALE, locale.toString());
+    }
+
+    /**
+     * Regenerates all locale-sensitive data if needed:
+     * nickname_lookup, name_lookup and sort keys. Invalidates the fast
+     * scrolling index cache.
+     */
+    public void setLocale(Locale locale) {
+        if (!needsToUpdateLocaleData(locale)) {
+            return;
+        }
+        Log.i(TAG, "Switching to locale " + locale
+                + " (ICU v" + ICU.getIcuVersion() + ")");
 
         final long start = SystemClock.elapsedRealtime();
         SQLiteDatabase db = getWritableDatabase();
         db.setLocale(locale);
         db.beginTransaction();
         try {
-            db.execSQL("DROP INDEX raw_contact_sort_key1_index");
-            db.execSQL("DROP INDEX raw_contact_sort_key2_index");
-            db.execSQL("DROP INDEX IF EXISTS name_lookup_index");
-
-            loadNicknameLookupTable(db);
-            insertNameLookup(db);
-            rebuildSortKeys(db, provider);
-            createContactsIndexes(db);
+            rebuildLocaleData(db, locale, true);
             db.setTransactionSuccessful();
         } finally {
             db.endTransaction();
@@ -3013,7 +3177,7 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
     /**
      * Regenerates sort keys for all contacts.
      */
-    private void rebuildSortKeys(SQLiteDatabase db, ContactsProvider2 provider) {
+    private void rebuildSortKeys(SQLiteDatabase db) {
         Cursor cursor = db.query(Tables.RAW_CONTACTS, new String[]{RawContacts._ID},
                 null, null, null, null, null);
         try {
@@ -3789,7 +3953,7 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
     /**
      * AOKP - add custom vibration columns
      */
-    private void upgradeToVersion705(SQLiteDatabase db) {
+    private void upgradeToVersion706(SQLiteDatabase db) {
         db.execSQL("ALTER TABLE contacts ADD custom_vibration TEXT DEFAULT NULL;");
         db.execSQL("ALTER TABLE raw_contacts ADD custom_vibration TEXT DEFAULT NULL;");
         
@@ -3802,6 +3966,40 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 "UPDATE " + Tables.RAW_CONTACTS +
                 "   SET " + RawContacts.CUSTOM_VIBRATION + "=NULL" +
                 " WHERE " + RawContacts._ID + " NOT NULL");
+    }
+
+    private void upgradeToVersion707(SQLiteDatabase db) {
+        db.execSQL("ALTER TABLE " + Tables.RAW_CONTACTS
+                + " ADD " + RawContactsColumns.PHONEBOOK_LABEL_PRIMARY + " TEXT;");
+        db.execSQL("ALTER TABLE " + Tables.RAW_CONTACTS
+                + " ADD " + RawContactsColumns.PHONEBOOK_BUCKET_PRIMARY + " INTEGER;");
+        db.execSQL("ALTER TABLE " + Tables.RAW_CONTACTS
+                + " ADD " + RawContactsColumns.PHONEBOOK_LABEL_ALTERNATIVE + " TEXT;");
+        db.execSQL("ALTER TABLE " + Tables.RAW_CONTACTS
+                + " ADD " + RawContactsColumns.PHONEBOOK_BUCKET_ALTERNATIVE + " INTEGER;");
+    }
+
+    private void upgradeToVersion710(SQLiteDatabase db) {
+
+        // Adding timestamp to contacts table.
+        db.execSQL("ALTER TABLE contacts"
+                + " ADD contact_last_updated_timestamp INTEGER;");
+
+        db.execSQL("UPDATE contacts"
+                + " SET contact_last_updated_timestamp"
+                + " = " + System.currentTimeMillis());
+
+        db.execSQL("CREATE INDEX contacts_contact_last_updated_timestamp_index "
+                + "ON contacts(contact_last_updated_timestamp)");
+
+        // New deleted contacts table.
+        db.execSQL("CREATE TABLE deleted_contacts (" +
+                "contact_id INTEGER PRIMARY KEY," +
+                "contact_deleted_timestamp INTEGER NOT NULL default 0"
+                + ");");
+
+        db.execSQL("CREATE INDEX deleted_contacts_contact_deleted_timestamp_index "
+                + "ON deleted_contacts(contact_deleted_timestamp)");
     }
 
     public String extractHandleFromEmailAddress(String email) {
@@ -3869,22 +4067,59 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
 
     /**
      * Adds index stats into the SQLite database to force it to always use the lookup indexes.
+     *
+     * Note if you drop a table or an index, the corresponding row will be removed from this table.
+     * Make sure to call this method after such operations.
      */
     private void updateSqliteStats(SQLiteDatabase db) {
+        if (!mDatabaseOptimizationEnabled) {
+            return; // We don't use sqlite_stat1 during tests.
+        }
 
         // Specific stats strings are based on an actual large database after running ANALYZE
         // Important here are relative sizes. Raw-Contacts is slightly bigger than Contacts
         // Warning: Missing tables in here will make SQLite assume to contain 1000000 rows,
         // which can lead to catastrophic query plans for small tables
 
-        // See the latest of version of http://www.sqlite.org/cgi/src/finfo?name=src/analyze.c
-        // for what these numbers mean.
+        // What these numbers mean is described in this file.
+        // http://www.sqlite.org/cgi/src/finfo?name=src/analyze.c
+
+        // Excerpt:
+        /*
+        ** Format of sqlite_stat1:
+        **
+        ** There is normally one row per index, with the index identified by the
+        ** name in the idx column.  The tbl column is the name of the table to
+        ** which the index belongs.  In each such row, the stat column will be
+        ** a string consisting of a list of integers.  The first integer in this
+        ** list is the number of rows in the index and in the table.  The second
+        ** integer is the average number of rows in the index that have the same
+        ** value in the first column of the index.  The third integer is the average
+        ** number of rows in the index that have the same value for the first two
+        ** columns.  The N-th integer (for N>1) is the average number of rows in
+        ** the index which have the same value for the first N-1 columns.  For
+        ** a K-column index, there will be K+1 integers in the stat column.  If
+        ** the index is unique, then the last integer will be 1.
+        **
+        ** The list of integers in the stat column can optionally be followed
+        ** by the keyword "unordered".  The "unordered" keyword, if it is present,
+        ** must be separated from the last integer by a single space.  If the
+        ** "unordered" keyword is present, then the query planner assumes that
+        ** the index is unordered and will not use the index for a range query.
+        **
+        ** If the sqlite_stat1.idx column is NULL, then the sqlite_stat1.stat
+        ** column contains a single integer which is the (estimated) number of
+        ** rows in the table identified by sqlite_stat1.tbl.
+        */
+
         try {
             db.execSQL("DELETE FROM sqlite_stat1");
             updateIndexStats(db, Tables.CONTACTS,
                     "contacts_has_phone_index", "9000 500");
             updateIndexStats(db, Tables.CONTACTS,
                     "contacts_name_raw_contact_id_index", "9000 1");
+            updateIndexStats(db, Tables.CONTACTS, MoreDatabaseUtils.buildIndexName(Tables.CONTACTS,
+                    Contacts.CONTACT_LAST_UPDATED_TIMESTAMP), "9000 10");
 
             updateIndexStats(db, Tables.RAW_CONTACTS,
                     "raw_contacts_contact_id_index", "10000 2");
@@ -4032,6 +4267,7 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         db.execSQL("DELETE FROM " + Tables.CALLS + ";");
         db.execSQL("DELETE FROM " + Tables.DIRECTORIES + ";");
         db.execSQL("DELETE FROM " + Tables.SEARCH_INDEX + ";");
+        db.execSQL("DELETE FROM " + Tables.DELETED_CONTACTS + ";");
 
         initializeCache(db);
 
@@ -4484,20 +4720,35 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
     }
 
     /**
-     * As opposed to {@link #buildPhoneLookupAndContactQuery}, this phone lookup will only do
-     * a comparison based on the last seven digits of the given phone number.  This is only intended
-     * to be used as a fallback, in case the regular lookup does not return any results.
+     * Phone lookup method that uses the custom SQLite function phone_number_compare_loose
+     * that serves as a fallback in case the regular lookup does not return any results.
      * @param qb The query builder.
      * @param number The phone number to search for.
      */
-    public void buildMinimalPhoneLookupAndContactQuery(SQLiteQueryBuilder qb, String number) {
-        String minMatch = PhoneNumberUtils.toCallerIDMinMatch(number);
-        StringBuilder sb = new StringBuilder();
-        appendPhoneLookupTables(sb, minMatch, true);
+    public void buildFallbackPhoneLookupAndContactQuery(SQLiteQueryBuilder qb, String number) {
+        final String minMatch = PhoneNumberUtils.toCallerIDMinMatch(number);
+        final StringBuilder sb = new StringBuilder();
+        //append lookup tables
+        sb.append(Tables.RAW_CONTACTS);
+        sb.append(" JOIN " + Views.CONTACTS + " as contacts_view"
+                + " ON (contacts_view._id = " + Tables.RAW_CONTACTS
+                + "." + RawContacts.CONTACT_ID + ")" +
+                " JOIN (SELECT " + PhoneLookupColumns.DATA_ID + "," +
+                PhoneLookupColumns.NORMALIZED_NUMBER + " FROM "+ Tables.PHONE_LOOKUP + " "
+                + "WHERE (" + Tables.PHONE_LOOKUP + "." + PhoneLookupColumns.MIN_MATCH + " = '");
+        sb.append(minMatch);
+        sb.append("')) AS lookup " +
+                "ON lookup." + PhoneLookupColumns.DATA_ID + "=" + Tables.DATA + "." + Data._ID
+                + " JOIN " + Tables.DATA + " "
+                + "ON " + Tables.DATA + "." + Data.RAW_CONTACT_ID + "=" + Tables.RAW_CONTACTS + "."
+                + RawContacts._ID);
+
         qb.setTables(sb.toString());
 
-        sb = new StringBuilder();
-        appendPhoneLookupSelection(sb, null, null);
+        sb.setLength(0);
+        sb.append("PHONE_NUMBERS_EQUAL(" + Tables.DATA + "." + Phone.NUMBER + ", ");
+        DatabaseUtils.appendEscapedSQLString(sb, number);
+        sb.append(mUseStrictPhoneNumberComparison ? ", 1)" : ", 0)");
         qb.appendWhere(sb.toString());
     }
 
@@ -4557,28 +4808,33 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 sb.append(" OR ");
             }
             if (hasNumber) {
-                int numberLen = number.length();
-                sb.append(" lookup.len <= ");
-                sb.append(numberLen);
-                sb.append(" AND substr(");
-                DatabaseUtils.appendEscapedSQLString(sb, number);
-                sb.append(',');
-                sb.append(numberLen);
-                sb.append(" - lookup.len + 1) = lookup.normalized_number");
+                // skip the suffix match entirely if we are using strict number comparison
+                if (!mUseStrictPhoneNumberComparison) {
+                    int numberLen = number.length();
+                    sb.append(" lookup.len <= ");
+                    sb.append(numberLen);
+                    sb.append(" AND substr(");
+                    DatabaseUtils.appendEscapedSQLString(sb, number);
+                    sb.append(',');
+                    sb.append(numberLen);
+                    sb.append(" - lookup.len + 1) = lookup.normalized_number");
 
-                // Some countries (e.g. Brazil) can have incoming calls which contain only the local
-                // number (no country calling code and no area code). This case is handled below.
-                // Details see b/5197612.
-                // This also handles a Gingerbread -> ICS upgrade issue; see b/5638376.
-                sb.append(" OR (");
-                sb.append(" lookup.len > ");
-                sb.append(numberLen);
-                sb.append(" AND substr(lookup.normalized_number,");
-                sb.append("lookup.len + 1 - ");
-                sb.append(numberLen);
-                sb.append(") = ");
-                DatabaseUtils.appendEscapedSQLString(sb, number);
-                sb.append(")");
+                    // Some countries (e.g. Brazil) can have incoming calls which contain only the local
+                    // number (no country calling code and no area code). This case is handled below.
+                    // Details see b/5197612.
+                    // This also handles a Gingerbread -> ICS upgrade issue; see b/5638376.
+                    sb.append(" OR (");
+                    sb.append(" lookup.len > ");
+                    sb.append(numberLen);
+                    sb.append(" AND substr(lookup.normalized_number,");
+                    sb.append("lookup.len + 1 - ");
+                    sb.append(numberLen);
+                    sb.append(") = ");
+                    DatabaseUtils.appendEscapedSQLString(sb, number);
+                    sb.append(")");
+                } else {
+                    sb.append("0");
+                }
             }
             sb.append(')');
         }
@@ -4661,33 +4917,14 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
     }
 
     /**
-     * Delete the aggregate contact if it has no constituent raw contacts other
-     * than the supplied one.
-     */
-    public void removeContactIfSingleton(long rawContactId) {
-        SQLiteDatabase db = getWritableDatabase();
-
-        // Obtain contact ID from the supplied raw contact ID
-        String contactIdFromRawContactId = "(SELECT " + RawContacts.CONTACT_ID + " FROM "
-                + Tables.RAW_CONTACTS + " WHERE " + RawContacts._ID + "=" + rawContactId + ")";
-
-        // Find other raw contacts in the same aggregate contact
-        String otherRawContacts = "(SELECT contacts1." + RawContacts._ID + " FROM "
-                + Tables.RAW_CONTACTS + " contacts1 JOIN " + Tables.RAW_CONTACTS + " contacts2 ON ("
-                + "contacts1." + RawContacts.CONTACT_ID + "=contacts2." + RawContacts.CONTACT_ID
-                + ") WHERE contacts1." + RawContacts._ID + "!=" + rawContactId + ""
-                + " AND contacts2." + RawContacts._ID + "=" + rawContactId + ")";
-
-        db.execSQL("DELETE FROM " + Tables.CONTACTS
-                + " WHERE " + Contacts._ID + "=" + contactIdFromRawContactId
-                + " AND NOT EXISTS " + otherRawContacts + ";");
-    }
-
-    /**
      * Returns the value from the {@link Tables#PROPERTIES} table.
      */
     public String getProperty(String key, String defaultValue) {
-        Cursor cursor = getReadableDatabase().query(Tables.PROPERTIES,
+        return getProperty(getReadableDatabase(), key, defaultValue);
+    }
+
+    public String getProperty(SQLiteDatabase db, String key, String defaultValue) {
+        Cursor cursor = db.query(Tables.PROPERTIES,
                 new String[]{PropertiesColumns.PROPERTY_VALUE},
                 PropertiesColumns.PROPERTY_KEY + "=?",
                 new String[]{key}, null, null, null);
@@ -4933,6 +5170,9 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 " FROM " + Tables.DATA +
                 " WHERE " + Data.RAW_CONTACT_ID + "=?" +
                         " AND (" + Data.DATA1 + " NOT NULL OR " +
+                                Data.DATA8 + " NOT NULL OR " +
+                                Data.DATA9 + " NOT NULL OR " +
+                                Data.DATA10 + " NOT NULL OR " +  // Phonetic name not empty
                                 Organization.TITLE + " NOT NULL)";
 
         public static final int MIMETYPE = 0;
@@ -5087,11 +5327,20 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         }
 
         if (bestPhoneticName != null) {
+            if (displayNamePrimary == null) {
+                displayNamePrimary = bestPhoneticName;
+            }
+            if (displayNameAlternative == null) {
+                displayNameAlternative = bestPhoneticName;
+            }
+            // Phonetic names disregard name order so displayNamePrimary and displayNameAlternative
+            // are the same.
             sortKeyPrimary = sortKeyAlternative = bestPhoneticName;
             if (bestPhoneticNameStyle == PhoneticNameStyle.UNDEFINED) {
                 bestPhoneticNameStyle = mNameSplitter.guessPhoneticNameStyle(bestPhoneticName);
             }
         } else {
+            bestPhoneticNameStyle = PhoneticNameStyle.UNDEFINED;
             if (displayNameStyle == FullNameStyle.UNDEFINED) {
                 displayNameStyle = mNameSplitter.guessFullNameStyle(bestDisplayName);
                 if (displayNameStyle == FullNameStyle.UNDEFINED
@@ -5103,15 +5352,28 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
             }
             if (displayNameStyle == FullNameStyle.CHINESE ||
                     displayNameStyle == FullNameStyle.CJK) {
-                sortKeyPrimary = sortKeyAlternative =
-                        ContactLocaleUtils.getIntance().getSortKey(
-                                sortNamePrimary, displayNameStyle);
+                sortKeyPrimary = sortKeyAlternative = sortNamePrimary;
             }
         }
 
         if (sortKeyPrimary == null) {
             sortKeyPrimary = sortNamePrimary;
             sortKeyAlternative = sortNameAlternative;
+        }
+
+        String phonebookLabelPrimary = "";
+        String phonebookLabelAlternative = "";
+        int phonebookBucketPrimary = 0;
+        int phonebookBucketAlternative = 0;
+        ContactLocaleUtils localeUtils = ContactLocaleUtils.getInstance();
+
+        if (sortKeyPrimary != null) {
+            phonebookBucketPrimary = localeUtils.getBucketIndex(sortKeyPrimary);
+            phonebookLabelPrimary = localeUtils.getBucketLabel(phonebookBucketPrimary);
+        }
+        if (sortKeyAlternative != null) {
+            phonebookBucketAlternative = localeUtils.getBucketIndex(sortKeyAlternative);
+            phonebookLabelAlternative = localeUtils.getBucketLabel(phonebookBucketAlternative);
         }
 
         if (mRawContactDisplayNameUpdate == null) {
@@ -5124,7 +5386,11 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                             RawContacts.PHONETIC_NAME + "=?," +
                             RawContacts.PHONETIC_NAME_STYLE + "=?," +
                             RawContacts.SORT_KEY_PRIMARY + "=?," +
-                            RawContacts.SORT_KEY_ALTERNATIVE + "=?" +
+                            RawContactsColumns.PHONEBOOK_LABEL_PRIMARY + "=?," +
+                            RawContactsColumns.PHONEBOOK_BUCKET_PRIMARY + "=?," +
+                            RawContacts.SORT_KEY_ALTERNATIVE + "=?," +
+                            RawContactsColumns.PHONEBOOK_LABEL_ALTERNATIVE + "=?," +
+                            RawContactsColumns.PHONEBOOK_BUCKET_ALTERNATIVE + "=?" +
                     " WHERE " + RawContacts._ID + "=?");
         }
 
@@ -5134,8 +5400,12 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         bindString(mRawContactDisplayNameUpdate, 4, bestPhoneticName);
         mRawContactDisplayNameUpdate.bindLong(5, bestPhoneticNameStyle);
         bindString(mRawContactDisplayNameUpdate, 6, sortKeyPrimary);
-        bindString(mRawContactDisplayNameUpdate, 7, sortKeyAlternative);
-        mRawContactDisplayNameUpdate.bindLong(8, rawContactId);
+        bindString(mRawContactDisplayNameUpdate, 7, phonebookLabelPrimary);
+        mRawContactDisplayNameUpdate.bindLong(8, phonebookBucketPrimary);
+        bindString(mRawContactDisplayNameUpdate, 9, sortKeyAlternative);
+        bindString(mRawContactDisplayNameUpdate, 10, phonebookLabelAlternative);
+        mRawContactDisplayNameUpdate.bindLong(11, phonebookBucketAlternative);
+        mRawContactDisplayNameUpdate.bindLong(12, rawContactId);
         mRawContactDisplayNameUpdate.execute();
     }
 
@@ -5307,6 +5577,16 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
 
     public String getCurrentCountryIso() {
         return mCountryMonitor.getCountryIso();
+    }
+
+    @NeededForTesting
+    /* package */ void setUseStrictPhoneNumberComparisonForTest(boolean useStrict) {
+        mUseStrictPhoneNumberComparison = useStrict;
+    }
+
+    @NeededForTesting
+    /* package */ boolean getUseStrictPhoneNumberComparisonForTest() {
+        return mUseStrictPhoneNumberComparison;
     }
 
     @NeededForTesting

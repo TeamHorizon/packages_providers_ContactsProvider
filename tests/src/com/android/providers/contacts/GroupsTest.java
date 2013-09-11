@@ -16,8 +16,6 @@
 
 package com.android.providers.contacts;
 
-import com.google.android.collect.Lists;
-
 import android.accounts.Account;
 import android.content.ContentProviderOperation;
 import android.content.ContentUris;
@@ -32,8 +30,11 @@ import android.provider.ContactsContract.CommonDataKinds.GroupMembership;
 import android.provider.ContactsContract.Contacts;
 import android.provider.ContactsContract.Groups;
 import android.provider.ContactsContract.Settings;
-import android.test.suitebuilder.annotation.LargeTest;
 import android.test.suitebuilder.annotation.MediumTest;
+
+import com.google.android.collect.Lists;
+
+import com.android.providers.contacts.testutil.RawContactUtil;
 
 import java.util.ArrayList;
 
@@ -255,7 +256,7 @@ public class GroupsTest extends BaseContactsProvider2Test {
         final Uri groupUri = ContentUris.withAppendedId(Groups.CONTENT_URI, groupId);
 
         // Create contact with specific membership
-        final long rawContactId = this.createRawContact(sTestAccount);
+        final long rawContactId = RawContactUtil.createRawContact(this.mResolver, sTestAccount);
         final long contactId = this.queryContactId(rawContactId);
         final Uri contactUri = ContentUris.withAppendedId(Contacts.CONTENT_URI, contactId);
 
@@ -278,7 +279,7 @@ public class GroupsTest extends BaseContactsProvider2Test {
     }
 
     public void testLocalSingleVisible() {
-        final long rawContactId = this.createRawContact();
+        final long rawContactId = RawContactUtil.createRawContact(this.mResolver);
 
         // Single, local contacts should always be visible
         assertRawContactVisible(rawContactId, true);
@@ -286,8 +287,8 @@ public class GroupsTest extends BaseContactsProvider2Test {
 
     public void testLocalMixedVisible() {
         // Aggregate, when mixed with local, should become visible
-        final long rawContactId1 = this.createRawContact();
-        final long rawContactId2 = this.createRawContact(sTestAccount);
+        final long rawContactId1 = RawContactUtil.createRawContact(this.mResolver);
+        final long rawContactId2 = RawContactUtil.createRawContact(this.mResolver, sTestAccount);
 
         final long groupId = this.createGroup(sTestAccount, GROUP_ID, GROUP_ID, 0);
         this.insertGroupMembership(rawContactId2, groupId);
@@ -309,7 +310,7 @@ public class GroupsTest extends BaseContactsProvider2Test {
     }
 
     public void testUngroupedVisible() {
-        final long rawContactId = this.createRawContact(sTestAccount);
+        final long rawContactId = RawContactUtil.createRawContact(this.mResolver, sTestAccount);
 
         final ContentValues values = new ContentValues();
         values.put(Settings.ACCOUNT_NAME, sTestAccount.name);
@@ -330,8 +331,8 @@ public class GroupsTest extends BaseContactsProvider2Test {
     }
 
     public void testMultipleSourcesVisible() {
-        final long rawContactId1 = this.createRawContact(sTestAccount);
-        final long rawContactId2 = this.createRawContact(sSecondAccount);
+        final long rawContactId1 = RawContactUtil.createRawContact(this.mResolver, sTestAccount);
+        final long rawContactId2 = RawContactUtil.createRawContact(this.mResolver, sSecondAccount);
 
         final long groupId = this.createGroup(sTestAccount, GROUP_ID, GROUP_ID, 0);
         this.insertGroupMembership(rawContactId1, groupId);

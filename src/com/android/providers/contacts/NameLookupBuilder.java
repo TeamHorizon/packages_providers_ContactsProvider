@@ -16,10 +16,10 @@
 
 package com.android.providers.contacts;
 
+import android.provider.ContactsContract.FullNameStyle;
+
 import com.android.providers.contacts.ContactsDatabaseHelper.NameLookupType;
 import com.android.providers.contacts.SearchIndexManager.IndexBuilder;
-
-import android.provider.ContactsContract.FullNameStyle;
 
 import java.util.Arrays;
 import java.util.Comparator;
@@ -319,9 +319,14 @@ public abstract class NameLookupBuilder {
         }
     }
 
-    private void appendNameShorthandLookup(IndexBuilder builder, String name, int fullNameStyle) {
+    /**
+     * Insert more name indexes according to locale specifies for those locales
+     * for which we have alternative shorthand name methods (eg, Pinyin for
+     * Chinese, Romaji for Japanese).
+     */
+    public void appendNameShorthandLookup(IndexBuilder builder, String name, int fullNameStyle) {
         Iterator<String> it =
-                ContactLocaleUtils.getIntance().getNameLookupKeys(name, fullNameStyle);
+                ContactLocaleUtils.getInstance().getNameLookupKeys(name, fullNameStyle);
         if (it != null) {
             while (it.hasNext()) {
                 builder.appendName(it.next());

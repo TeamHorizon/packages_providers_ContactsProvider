@@ -16,11 +16,12 @@
 
 package com.android.providers.contacts;
 
-import com.android.vcard.VCardComposer;
-import com.android.vcard.VCardConfig;
-
 import android.content.ContentResolver;
 import android.test.suitebuilder.annotation.MediumTest;
+
+import com.android.providers.contacts.testutil.RawContactUtil;
+import com.android.vcard.VCardComposer;
+import com.android.vcard.VCardConfig;
 
 /**
  * Tests (or integration tests) verifying if vCard library works well with {@link ContentResolver}.
@@ -37,7 +38,7 @@ public class VCardTest extends BaseContactsProvider2Test {
      * a vCard string.
      */
     public void testCompose() {
-        createRawContactWithName("John", "Doe");
+        RawContactUtil.createRawContactWithName(mResolver, "John", "Doe");
         final VCardComposer composer = new VCardComposer(
                 getContext(), mResolver, VCardConfig.VCARD_TYPE_DEFAULT, null, true);
         assertTrue(composer.init());
