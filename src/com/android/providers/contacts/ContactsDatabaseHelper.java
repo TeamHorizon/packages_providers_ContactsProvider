@@ -71,6 +71,7 @@ import android.provider.ContactsContract.StreamItemPhotos;
 import android.provider.ContactsContract.StreamItems;
 import android.provider.VoicemailContract;
 import android.provider.VoicemailContract.Voicemails;
+import android.telephony.DisconnectCause;
 import android.telephony.PhoneNumberUtils;
 import android.text.TextUtils;
 import android.text.util.Rfc822Token;
@@ -115,7 +116,7 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
      *   800-899 Kitkat
      * </pre>
      */
-    static final int DATABASE_VERSION = 803;
+    static final int DATABASE_VERSION = 804;
 
     private static final String DATABASE_NAME = "contacts2.db";
     private static final String DATABASE_PRESENCE = "presence_db";
@@ -1294,6 +1295,8 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
                 Calls.CACHED_NORMALIZED_NUMBER + " TEXT," +
                 Calls.CACHED_PHOTO_ID + " INTEGER NOT NULL DEFAULT 0," +
                 Calls.CACHED_FORMATTED_NUMBER + " TEXT," +
+                Calls.DISCONNECT_CAUSE + " INTEGER NOT NULL DEFAULT " +
+                DisconnectCause.NOT_VALID + "," +
                 Voicemails._DATA + " TEXT," +
                 Voicemails.HAS_CONTENT + " INTEGER," +
                 Voicemails.MIME_TYPE + " TEXT," +
@@ -2529,6 +2532,12 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
             // now indexed as names.
             upgradeSearchIndex = true;
             oldVersion = 803;
+        }
+
+        if (oldVersion < 804) {
+            upgradeViewsAndTriggers = true;
+            upgradeToVersion804(db);
+            oldVersion = 804;
         }
 
         if (upgradeViewsAndTriggers) {
@@ -4044,6 +4053,11 @@ public class ContactsDatabaseHelper extends SQLiteOpenHelper {
         Log.v(TAG, "Adding is_restricted column to database");
         db.execSQL("ALTER TABLE raw_contacts"
                 + " ADD is_restricted INTEGER;");
+}
+
+    private void upgradeToVersion804(SQLiteDatabase db) {
+        db.execSQL("ALTER TABLE calls ADD disconnect_cause INTEGER NOT NULL DEFAULT " +
+                DisconnectCause.NOT_VALID + ";");
     }
 
     public String extractHandleFromEmailAddress(String email) {
